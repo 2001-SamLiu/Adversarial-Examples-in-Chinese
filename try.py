@@ -16,6 +16,7 @@ def _get_masked(words):
     for i in range(len_text - 1):
         masked_words.append(words[0:i] + ['[UNK]'] + words[i + 1:])
     # list of words
+    masked_words.append(words[:len_text-1]+['[UNK]'])
     return masked_words 
 masked_words = _get_masked(word_list)
 texts = [' '.join(words) for words in masked_words]
