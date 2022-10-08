@@ -217,7 +217,7 @@ def get_bpe_substitues(substitutes, tokenizer, mlm_model):
 
 def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
     # MLM-process
-    words, sub_words, keys = _tokenize(feature.seq, tokenizer)
+    words, sub_words, keys = chinese_tokenize(feature.seq, tokenizer)
 
     # original label
     inputs = tokenizer.encode_plus(feature.seq, None, add_special_tokens=True, max_length=max_length, )
