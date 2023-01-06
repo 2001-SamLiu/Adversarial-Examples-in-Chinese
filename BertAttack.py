@@ -63,12 +63,15 @@ def get_sim_embed(embed_path, sim_path):
 
 
 def get_data_cls(data_path):
-    lines = open(data_path, 'r', encoding='utf-8').readlines()[1:]
+    lines = open(data_path, 'r', encoding='utf-8').readlines()[0:]
     features = []
     for i, line in enumerate(lines):
-        split = line.strip('\n').split('\t')
-        label = int(split[-1])
-        seq = split[0]
+        if i>100:
+            break
+        split = line.split("_!_")
+        label = int(split[1])
+        label -= 100
+        seq = split[-2]+split[-1]
 
         features.append([seq, label])
     return features
@@ -87,13 +90,16 @@ class Feature(object):
 
 
 def chinese_tokenize(seq):
-    seq = seq.replace('\n','，')
-    sentences = re.split( '\，|\！|\？|\。|\,|\.|\?|\!', seq)
+    keys = []
     words = []
-    for sentence in sentences:
-        word = jieba.cut(sentence, use_paddle=True)
-        words += word
-    return words
+    index = 0
+    for i in range(len(seq)):
+        if seq[i] in ["，", "。" ,"！","？",',','.','!','?']:
+            continue
+        words.append(seq[i])
+        keys.append([index,index+1])
+        index+=1
+    return words, keys
 
 def _get_masked(words):
     len_text = len(words)
@@ -217,7 +223,7 @@ def get_bpe_substitues(substitutes, tokenizer, mlm_model):
 
 def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
     # MLM-process
-    words, sub_words, keys = chinese_tokenize(feature.seq, tokenizer)
+    words, keys = chinese_tokenize(feature.seq)
 
     # original label
     inputs = tokenizer.encode_plus(feature.seq, None, add_special_tokens=True, max_length=max_length, )
@@ -236,13 +242,15 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
         feature.success = 3
         return feature
 
-    sub_words = ['[CLS]'] + sub_words[:max_length - 2] + ['[SEP]']
-    input_ids_ = torch.tensor([tokenizer.convert_tokens_to_ids(sub_words)])
+    words = ['[CLS]'] + words[:max_length - 2] + ['[SEP]']
+    keys = ([[0,1]]) + keys + ([[keys[-1][1], keys[-1][1]+1]])
+    input_ids_ = torch.tensor([tokenizer.convert_tokens_to_ids(words)])
     word_predictions = mlm_model(input_ids_.to('cuda'))[0].squeeze()  # seq-len(sub) vocab
     word_pred_scores_all, word_predictions = torch.topk(word_predictions, k, -1)  # seq-len k
-
-    word_predictions = word_predictions[1:len(sub_words) + 1, :]
-    word_pred_scores_all = word_pred_scores_all[1:len(sub_words) + 1, :]
+    # print(word_predictions)
+    word_predictions = word_predictions[1:len(words) + 1, :]
+    # print(word_predictions)
+    word_pred_scores_all = word_pred_scores_all[1:len(words) + 1, :]
 
     important_scores = get_important_scores(words, tgt_model, current_prob, orig_label, orig_probs,
                                             tokenizer, batch_size, max_length)
@@ -262,12 +270,12 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
         if keys[top_index[0]][0] > max_length - 2:
             continue
 
-
-        substitutes = word_predictions[keys[top_index[0]][0]:keys[top_index[0]][1]]  # L, k
-        word_pred_scores = word_pred_scores_all[keys[top_index[0]][0]:keys[top_index[0]][1]]
+        # print(tgt_word)
+        substitutes = word_predictions[keys[top_index[0]-1][0]:keys[top_index[0]-1][1]]  # L, k
+        word_pred_scores = word_pred_scores_all[keys[top_index[0]-1][0]:keys[top_index[0]-1][1]]
 
         substitutes = get_substitues(substitutes, tokenizer, mlm_model, use_bpe, word_pred_scores, threshold_pred_score)
-
+        # print(substitutes)
 
         most_gap = 0.0
         candidate = None
@@ -283,7 +291,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
             if substitute in filter_words:
                 continue
             if substitute in w2i and tgt_word in w2i:
-                if cos_mat[w2i[substitute]][w2i[tgt_word]] < 0.4:
+                if cos_mat[w2i[substitute]][w2i[tgt_word]] < 0.4: #计算cos_sim作为条件之一
                     continue
             temp_replace = final_words
             temp_replace[top_index[0]] = substitute
@@ -417,18 +425,18 @@ def dump_features(features, output):
                         'adv': feature.final_adverse,
                         })
     output_json = output
-    json.dump(outputs, open(output_json, 'w'), indent=2)
+    json.dump(outputs, open(output_json, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
 
     print('finished dump')
 
 
 def run_attack():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_path", type=str, help="./data/xxx")
-    parser.add_argument("--mlm_path", type=str, help="xxx mlm")
-    parser.add_argument("--tgt_path", type=str, help="xxx classifier")
+    parser.add_argument("--data_path", type=str, default = './data/eval.txt', help="./data/xxx")
+    parser.add_argument("--mlm_path", type=str, default = './bert-base-chinese', help="xxx mlm")
+    parser.add_argument("--tgt_path", type=str, default = './finetuned-model', help="xxx classifier")
 
-    parser.add_argument("--output_dir", type=str, help="train file")
+    parser.add_argument("--output_dir", type=str, default = './data/output.json', help="train file")
     parser.add_argument("--use_sim_mat", type=int, help='whether use cosine_similarity to filter out atonyms')
     parser.add_argument("--start", type=int, help="start step, for multi-thread process")
     parser.add_argument("--end", type=int, help="end step, for multi-thread process")
