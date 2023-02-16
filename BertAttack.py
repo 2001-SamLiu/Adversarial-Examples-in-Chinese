@@ -66,12 +66,12 @@ def get_data_cls(data_path):
     lines = open(data_path, 'r', encoding='utf-8').readlines()[0:]
     features = []
     for i, line in enumerate(lines):
-        if i>100:
+        if i>10:
             break
         split = line.split("_!_")
         label = int(split[1])
         label -= 100
-        seq = split[-2]+split[-1]
+        seq = split[-2]
 
         features.append([seq, label])
     return features
@@ -276,12 +276,12 @@ def get_bpe_substitues(substitutes, tokenizer, mlm_model):
     return final_words
 
 
-def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
+def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, attack_name='BertAttack', cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
     # MLM-process
     words, keys = chinese_tokenize(feature.seq)
 
     # original label
-    inputs = tokenizer(feature.seq, None, max_length=max_length, 
+    inputs = tokenizer(feature.seq, None, max_length=max_length,
         padding='max_length', truncation=True, return_token_type_ids=True)
     input_ids, token_type_ids = torch.tensor(inputs["input_ids"]), torch.tensor(inputs["token_type_ids"])
     attention_mask = torch.tensor(inputs['attention_mask'])
@@ -304,19 +304,21 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
     word_predictions = mlm_model(input_ids_.to('cuda'))[0].squeeze()  # seq-len(sub) vocab
     word_pred_scores_all, word_predictions = torch.topk(word_predictions, k, -1)  # seq-len k
     # print(word_predictions)
-    word_predictions = word_predictions[1:len(words), :]
+    word_predictions = word_predictions[1:len(words) - 1, :]
     # print(word_predictions)
-    word_pred_scores_all = word_pred_scores_all[1:len(words), :]
-
-    important_scores = get_important_scores_mask(words, tgt_model, current_prob, orig_label, orig_probs,
+    word_pred_scores_all = word_pred_scores_all[1:len(words) - 1, :]
+    if attack_name == 'BertAttack':
+        important_scores = get_important_scores_mask(words, tgt_model, current_prob, orig_label, orig_probs,
+                                            tokenizer, batch_size, max_length)
+    if attack_name == 'TextFooler' or attack_name == 'BAE':
+        important_scores = get_important_scores_delete(words, tgt_model, current_prob, orig_label, orig_probs,
                                             tokenizer, batch_size, max_length)
     feature.query += int(len(words))
     list_of_index = sorted(enumerate(important_scores), key=lambda x: x[1], reverse=True)
-    # print(list_of_index)
     final_words = copy.deepcopy(words)
 
     for top_index in list_of_index:
-        # top_index[0] 是下标，top_index[1]是score
+        # top_index[0] 是下标，top_index[1]是score，数据来源是带有特殊标志的句子
         if feature.change > int(0.4 * (len(words))):
             feature.success = 1  # exceed
             return feature
@@ -324,15 +326,14 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
         tgt_word = words[top_index[0]]
         if tgt_word in filter_words:
             continue
-        if keys[top_index[0]][0] > max_length - 2:
+        if keys[top_index[0]][0] > max_length - 2 or top_index[0] == 0 or top_index == len(words)-1:
             continue
 
         # print(tgt_word)
-        substitutes = word_predictions[keys[top_index[0]-1][0]:keys[top_index[0]-1][1]]  # L, k
-        word_pred_scores = word_pred_scores_all[keys[top_index[0]-1][0]:keys[top_index[0]-1][1]]
+        substitutes = word_predictions[keys[top_index[0]][0]:keys[top_index[0]][1]]  # L, k
+        word_pred_scores = word_pred_scores_all[keys[top_index[0]][0]:keys[top_index[0]][1]]
 
         substitutes = get_substitues(substitutes, tokenizer, mlm_model, use_bpe, word_pred_scores, threshold_pred_score)
-        # print(substitutes)
 
         most_gap = 0.0
         candidate = None
@@ -350,10 +351,11 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
             if substitute in w2i and tgt_word in w2i:
                 if cos_mat[w2i[substitute]][w2i[tgt_word]] < 0.4: #计算cos_sim作为条件之一
                     continue
-            temp_replace = final_words
+            temp_replace = copy.deepcopy(final_words)
             temp_replace[top_index[0]] = substitute
-            temp_text = tokenizer.convert_tokens_to_string(temp_replace)
-            inputs = tokenizer.encode_plus(temp_text, None, add_special_tokens=True, max_length=max_length, )
+            temp_text = ''.join(temp_replace)
+            inputs = tokenizer(temp_text, None, max_length=max_length, truncation=True, 
+                padding='max_length')
             input_ids = torch.tensor(inputs["input_ids"]).unsqueeze(0).to('cuda')
             seq_len = input_ids.size(1)
             temp_prob = tgt_model(input_ids)[0].squeeze()
@@ -382,7 +384,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
             current_prob = current_prob - most_gap
             final_words[top_index[0]] = candidate
 
-    feature.final_adverse = (tokenizer.convert_tokens_to_string(final_words))
+    feature.final_adverse = ''.join(final_words)
     feature.success = 2
     return feature
 
@@ -503,7 +505,9 @@ def run_attack():
     parser.add_argument("--threshold_pred_score", type=float, )
 
     parser.add_argument("--attack_name", type=str, default='BertAttack')
+    parser.add_argument("--attack_mode", type=str, choices=['R', 'I', 'R/I', 'R+I'], default='R')
 
+    
     attack_list = ['BertAttack', 'TextFooler', 'BAE', 'CLARE']
     
     args = parser.parse_args()
@@ -548,7 +552,7 @@ def run_attack():
             feat = Feature(seq_a, label)
             print('\r number {:d} '.format(index) + tgt_path, end='')
             # print(feat.seq[:100], feat.label)
-            feat = attack(feat, tgt_model, mlm_model, tokenizer_tgt, k, batch_size=32, max_length=512,
+            feat = attack(feat, tgt_model, mlm_model, tokenizer_tgt, k, batch_size=32, max_length=512, attack_name = args.attack_name,
                           cos_mat=cos_mat, w2i=w2i, i2w=i2w, use_bpe=use_bpe,threshold_pred_score=threshold_pred_score)
 
             # print(feat.changes, feat.change, feat.query, feat.success)
