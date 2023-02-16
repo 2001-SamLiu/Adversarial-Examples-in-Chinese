@@ -92,13 +92,15 @@ class Feature(object):
 def chinese_tokenize(seq):
     keys = []
     words = []
+    seg_keys = []
+    segs = jieba.cut(seq)
     index = 0
-    for i in range(len(seq)):
-        if seq[i] in ["，", "。" ,"！","？",',','.','!','?']:
-            continue
-        words.append(seq[i])
-        keys.append([index,index+1])
-        index+=1
+    for i, seg in enumerate(segs):
+        seg_keys.append([index, index+len(seg)])
+        for j in range(len(seg)):
+            words.append(seg[j])
+            keys.append([index,index+1])
+            index+=1
     return words, keys
 
 def _get_masked(words):
@@ -110,21 +112,74 @@ def _get_masked(words):
     # list of words
     return masked_words
 
+def _get_deleted(words):
+    len_text = len(words)
+    deleted_words = []
+    for i in range(len_text - 1):
+        deleted_words.append(words[0:i] + words[i + 1:])
+    deleted_words.append(words[:len_text-1])
+    # list of words
+    return deleted_words
 
-def get_important_scores(words, tgt_model, orig_prob, orig_label, orig_probs, tokenizer, batch_size, max_length):
+def get_important_scores_mask(words, tgt_model, orig_prob, orig_label, orig_probs, tokenizer, batch_size, max_length):
     masked_words = _get_masked(words)
-    texts = [' '.join(words) for words in masked_words]  # list of text of masked words
+    texts = [''.join(words) for words in masked_words]  # list of text of masked words
     all_input_ids = []
     all_masks = []
     all_segs = []
     for text in texts:
-        inputs = tokenizer.encode_plus(text, None, add_special_tokens=True, max_length=max_length, )
+        inputs = tokenizer(text, None, max_length=max_length,truncation=True,
+                 padding='max_length', return_token_type_ids=True)
         input_ids, token_type_ids = inputs["input_ids"], inputs["token_type_ids"]
-        attention_mask = [1] * len(input_ids)
-        padding_length = max_length - len(input_ids)
-        input_ids = input_ids + (padding_length * [0])
-        token_type_ids = token_type_ids + (padding_length * [0])
-        attention_mask = attention_mask + (padding_length * [0])
+        attention_mask = inputs['attention_mask']
+        assert(len(input_ids)==max_length)
+        assert(len(token_type_ids)==max_length)
+        assert(len(attention_mask)==max_length)
+        all_input_ids.append(input_ids)
+        all_masks.append(attention_mask)
+        all_segs.append(token_type_ids)
+    seqs = torch.tensor(all_input_ids, dtype=torch.long)
+    masks = torch.tensor(all_masks, dtype=torch.long)
+    segs = torch.tensor(all_segs, dtype=torch.long)
+    seqs = seqs.to('cuda')
+
+    eval_data = TensorDataset(seqs)
+    # Run prediction for full data
+    eval_sampler = SequentialSampler(eval_data)
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=batch_size)
+    leave_1_probs = []
+    for batch in eval_dataloader:
+        masked_input, = batch
+        bs = masked_input.size(0)
+
+        leave_1_prob_batch = tgt_model(masked_input)[0]  # B num-label
+        leave_1_probs.append(leave_1_prob_batch)
+    leave_1_probs = torch.cat(leave_1_probs, dim=0)  # words, num-label
+    leave_1_probs = torch.softmax(leave_1_probs, -1)  #
+    leave_1_probs_argmax = torch.argmax(leave_1_probs, dim=-1)
+    import_scores = (orig_prob
+                     - leave_1_probs[:, orig_label]
+                     +
+                     (leave_1_probs_argmax != orig_label).float()
+                     * (leave_1_probs.max(dim=-1)[0] - torch.index_select(orig_probs, 0, leave_1_probs_argmax))
+                     ).data.cpu().numpy()
+
+    return import_scores
+
+def get_important_scores_delete(words, tgt_model, orig_prob, orig_label, orig_probs, tokenizer, batch_size, max_length):
+    deleted_words = _get_deleted(words)
+    texts = [''.join(words) for words in deleted_words]  # list of text of masked words
+    all_input_ids = []
+    all_masks = []
+    all_segs = []
+    for text in texts:
+        inputs = tokenizer(text, None, max_length=max_length,truncation=True,
+                 padding='max_length', return_token_type_ids=True)
+        input_ids, token_type_ids = inputs["input_ids"], inputs["token_type_ids"]
+        attention_mask = inputs['attention_mask']
+        assert(len(input_ids)==max_length)
+        assert(len(token_type_ids)==max_length)
+        assert(len(attention_mask)==max_length)
         all_input_ids.append(input_ids)
         all_masks.append(attention_mask)
         all_segs.append(token_type_ids)
@@ -215,7 +270,7 @@ def get_bpe_substitues(substitutes, tokenizer, mlm_model):
     word_list = [all_substitutes[i] for i in word_list]
     final_words = []
     for word in word_list:
-        tokens = [tokenizer._convert_id_to_token(int(i)) for i in word]
+        tokens = [tokenizer.convert_id_to_token(int(i)) for i in word]
         text = tokenizer.convert_tokens_to_string(tokens)
         final_words.append(text)
     return final_words
@@ -226,9 +281,10 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
     words, keys = chinese_tokenize(feature.seq)
 
     # original label
-    inputs = tokenizer.encode_plus(feature.seq, None, add_special_tokens=True, max_length=max_length, )
+    inputs = tokenizer(feature.seq, None, max_length=max_length, 
+        padding='max_length', truncation=True, return_token_type_ids=True)
     input_ids, token_type_ids = torch.tensor(inputs["input_ids"]), torch.tensor(inputs["token_type_ids"])
-    attention_mask = torch.tensor([1] * len(input_ids))
+    attention_mask = torch.tensor(inputs['attention_mask'])
     seq_len = input_ids.size(0)
     orig_probs = tgt_model(input_ids.unsqueeze(0).to('cuda'),
                            attention_mask.unsqueeze(0).to('cuda'),
@@ -248,11 +304,11 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
     word_predictions = mlm_model(input_ids_.to('cuda'))[0].squeeze()  # seq-len(sub) vocab
     word_pred_scores_all, word_predictions = torch.topk(word_predictions, k, -1)  # seq-len k
     # print(word_predictions)
-    word_predictions = word_predictions[1:len(words) + 1, :]
+    word_predictions = word_predictions[1:len(words), :]
     # print(word_predictions)
-    word_pred_scores_all = word_pred_scores_all[1:len(words) + 1, :]
+    word_pred_scores_all = word_pred_scores_all[1:len(words), :]
 
-    important_scores = get_important_scores(words, tgt_model, current_prob, orig_label, orig_probs,
+    important_scores = get_important_scores_mask(words, tgt_model, current_prob, orig_label, orig_probs,
                                             tokenizer, batch_size, max_length)
     feature.query += int(len(words))
     list_of_index = sorted(enumerate(important_scores), key=lambda x: x[1], reverse=True)
@@ -260,6 +316,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
     final_words = copy.deepcopy(words)
 
     for top_index in list_of_index:
+        # top_index[0] 是下标，top_index[1]是score
         if feature.change > int(0.4 * (len(words))):
             feature.success = 1  # exceed
             return feature
@@ -445,9 +502,9 @@ def run_attack():
     parser.add_argument("--k", type=int, )
     parser.add_argument("--threshold_pred_score", type=float, )
 
-    parser.add_argument("--attack_name", type=str)
+    parser.add_argument("--attack_name", type=str, default='BertAttack')
 
-    attack_list = ['BertAttack']
+    attack_list = ['BertAttack', 'TextFooler', 'BAE', 'CLARE']
     
     args = parser.parse_args()
     assert(args.attack_name in attack_list)
