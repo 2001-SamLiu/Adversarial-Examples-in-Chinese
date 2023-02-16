@@ -445,8 +445,12 @@ def run_attack():
     parser.add_argument("--k", type=int, )
     parser.add_argument("--threshold_pred_score", type=float, )
 
+    parser.add_argument("--attack_name", type=str)
 
+    attack_list = ['BertAttack']
+    
     args = parser.parse_args()
+    assert(args.attack_name in attack_list)
     data_path = str(args.data_path)
     mlm_path = str(args.mlm_path)
     tgt_path = str(args.tgt_path)
