@@ -13,7 +13,8 @@ import numpy as np
 
 import jieba
 import re
-
+import tensorflow as tf
+import tensorflow_hub as hub
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -60,6 +61,41 @@ def get_sim_embed(embed_path, sim_path):
 
     cos_sim = np.load(sim_path)
     return cos_sim, word2id, id2word
+cache_path = ''
+class USE(object):
+    def __init__(self, cache_path):
+        super(USE, self).__init__()
+
+        self.embed = hub.Module(cache_path)
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        self.sess = tf.Session()
+        self.build_graph()
+        self.sess.run([tf.global_variables_initializer(), tf.tables_initializer()])
+
+    def build_graph(self):
+        self.sts_input1 = tf.placeholder(tf.string, shape=(None))
+        self.sts_input2 = tf.placeholder(tf.string, shape=(None))
+
+        sts_encode1 = tf.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
+        sts_encode2 = tf.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
+        self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
+        clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
+        self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
+
+    def semantic_sim(self, sents1, sents2):
+        sents1 = [s.lower() for s in sents1]
+        sents2 = [s.lower() for s in sents2]
+        scores = self.sess.run(
+            [self.sim_scores],
+            feed_dict={
+                self.sts_input1: sents1,
+                self.sts_input2: sents2,
+            })
+        return scores[0]
+
+use = USE(cache_path)
+
 
 
 def get_data_cls(data_path):
@@ -276,7 +312,7 @@ def get_bpe_substitues(substitutes, tokenizer, mlm_model):
     return final_words
 
 
-def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, attack_name='BertAttack', cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
+def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=512, attack_name='BertAttack', attack_mode=None, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3):
     # MLM-process
     words, keys = chinese_tokenize(feature.seq)
 
@@ -300,13 +336,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
 
     words = ['[CLS]'] + words[:max_length - 2] + ['[SEP]']
     keys = ([[0,1]]) + keys + ([[keys[-1][1], keys[-1][1]+1]])
-    input_ids_ = torch.tensor([tokenizer.convert_tokens_to_ids(words)])
-    word_predictions = mlm_model(input_ids_.to('cuda'))[0].squeeze()  # seq-len(sub) vocab
-    word_pred_scores_all, word_predictions = torch.topk(word_predictions, k, -1)  # seq-len k
-    # print(word_predictions)
-    word_predictions = word_predictions[1:len(words) - 1, :]
-    # print(word_predictions)
-    word_pred_scores_all = word_pred_scores_all[1:len(words) - 1, :]
+    
     if attack_name == 'BertAttack':
         important_scores = get_important_scores_mask(words, tgt_model, current_prob, orig_label, orig_probs,
                                             tokenizer, batch_size, max_length)
@@ -317,6 +347,15 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
     list_of_index = sorted(enumerate(important_scores), key=lambda x: x[1], reverse=True)
     final_words = copy.deepcopy(words)
 
+
+    input_ids_ = torch.tensor([tokenizer.convert_tokens_to_ids(words)])
+    replace_rword_predictions = mlm_model(input_ids_.to('cuda'))[0].squeeze()  # seq-len(sub) vocab
+    replace_word_pred_scores_all, replace_word_predictions = torch.topk(word_predictions, k, -1)  # seq-len k
+    # print(word_predictions)
+    replace_word_predictions = replace_word_predictions[1:len(words) - 1, :]
+    # print(word_predictions)
+    replace_word_pred_scores_all = replace_word_pred_scores_all[1:len(words) - 1, :]
+
     for top_index in list_of_index:
         # top_index[0] 是下标，top_index[1]是score，数据来源是带有特殊标志的句子
         if feature.change > int(0.4 * (len(words))):
@@ -324,14 +363,15 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=5
             return feature
 
         tgt_word = words[top_index[0]]
-        if tgt_word in filter_words:
+        if tgt_word in filter_words and attack_name=='BertAttack':
             continue
         if keys[top_index[0]][0] > max_length - 2 or top_index[0] == 0 or top_index == len(words)-1:
             continue
 
         # print(tgt_word)
-        substitutes = word_predictions[keys[top_index[0]][0]:keys[top_index[0]][1]]  # L, k
-        word_pred_scores = word_pred_scores_all[keys[top_index[0]][0]:keys[top_index[0]][1]]
+        if attack_name == 'BertAttack' or (attack_name == 'BAE' and attack_mode == 'R'):
+            substitutes = replace_word_predictions[keys[top_index[0]][0]:keys[top_index[0]][1]]  # L, k
+            word_pred_scores = replace_word_pred_scores_all[keys[top_index[0]][0]:keys[top_index[0]][1]]
 
         substitutes = get_substitues(substitutes, tokenizer, mlm_model, use_bpe, word_pred_scores, threshold_pred_score)
 
@@ -394,47 +434,6 @@ def evaluate(features):
     use = None
     sim_thres = 0
     # evaluate with USE
-
-    if do_use == 1:
-        cache_path = ''
-        import tensorflow as tf
-        import tensorflow_hub as hub
-    
-        class USE(object):
-            def __init__(self, cache_path):
-                super(USE, self).__init__()
-
-                self.embed = hub.Module(cache_path)
-                config = tf.ConfigProto()
-                config.gpu_options.allow_growth = True
-                self.sess = tf.Session()
-                self.build_graph()
-                self.sess.run([tf.global_variables_initializer(), tf.tables_initializer()])
-
-            def build_graph(self):
-                self.sts_input1 = tf.placeholder(tf.string, shape=(None))
-                self.sts_input2 = tf.placeholder(tf.string, shape=(None))
-
-                sts_encode1 = tf.nn.l2_normalize(self.embed(self.sts_input1), axis=1)
-                sts_encode2 = tf.nn.l2_normalize(self.embed(self.sts_input2), axis=1)
-                self.cosine_similarities = tf.reduce_sum(tf.multiply(sts_encode1, sts_encode2), axis=1)
-                clip_cosine_similarities = tf.clip_by_value(self.cosine_similarities, -1.0, 1.0)
-                self.sim_scores = 1.0 - tf.acos(clip_cosine_similarities)
-
-            def semantic_sim(self, sents1, sents2):
-                sents1 = [s.lower() for s in sents1]
-                sents2 = [s.lower() for s in sents2]
-                scores = self.sess.run(
-                    [self.sim_scores],
-                    feed_dict={
-                        self.sts_input1: sents1,
-                        self.sts_input2: sents2,
-                    })
-                return scores[0]
-
-            use = USE(cache_path)
-
-
     acc = 0
     origin_success = 0
     total = 0
@@ -505,8 +504,8 @@ def run_attack():
     parser.add_argument("--threshold_pred_score", type=float, )
 
     parser.add_argument("--attack_name", type=str, default='BertAttack')
-    parser.add_argument("--attack_mode", type=str, choices=['R', 'I', 'R/I', 'R+I'], default='R')
-
+    parser.add_argument("--attack_mode", type=str, choices=['R', 'I', 'R/I', 'R+I'], default=None)
+    parser.add_argument("--use_threshold", type=float, default=0.7)
     
     attack_list = ['BertAttack', 'TextFooler', 'BAE', 'CLARE']
     
@@ -552,7 +551,8 @@ def run_attack():
             feat = Feature(seq_a, label)
             print('\r number {:d} '.format(index) + tgt_path, end='')
             # print(feat.seq[:100], feat.label)
-            feat = attack(feat, tgt_model, mlm_model, tokenizer_tgt, k, batch_size=32, max_length=512, attack_name = args.attack_name,
+            feat = attack(feat, tgt_model, mlm_model, tokenizer_tgt, k, batch_size=32, max_length=512, 
+                          attack_name = args.attack_name, attack_mode=args.attack_mode,
                           cos_mat=cos_mat, w2i=w2i, i2w=i2w, use_bpe=use_bpe,threshold_pred_score=threshold_pred_score)
 
             # print(feat.changes, feat.change, feat.query, feat.success)
