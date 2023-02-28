@@ -249,7 +249,7 @@ def insert_mask_based_index(index, mode, raw_text, mask_token):
 def merge_mask_based_index(index, raw_text, mask_token):
     return raw_text[:index] + [mask_token] + raw_text[index+2:] if index+2 < len(raw_text) else raw_text[:index] + [mask_token]
 
-def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=128, attack_name='BertAttack', attack_mode=None, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3, use_threshold=0.7):
+def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=128, attack_name='BertAttack', attack_mode=None, cos_mat=None, w2i={}, i2w={}, use_bpe=1, threshold_pred_score=0.3, use_threshold=0.7, max_change_times=10):
     # MLM-process
     words, keys = chinese_tokenize(feature.seq)
 
@@ -274,7 +274,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
     words = ['[CLS]'] + words[:max_length - 2] + ['[SEP]']
     keys = ([[0,1]]) + keys + ([[keys[-1][1], keys[-1][1]+1]])
     
-    if attack_name == 'BertAttack':
+    if attack_name == 'BertAttack' or attack_name == 'CLARE':
         important_scores = get_important_scores(words, tgt_model, current_prob, orig_label, orig_probs,
                                             tokenizer, batch_size, max_length, mode='mask')
     if attack_name == 'TextFooler' or attack_name == 'BAE':
@@ -290,7 +290,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
     replace_word_pred_scores_all, replace_word_predictions = torch.topk(replace_word_predictions, k, -1)  # seq-len k
     # print(word_predictions)
     replace_word_predictions = replace_word_predictions[1:len(words) - 1, :]
-    # print(word_predictions)
+    # print(replace_word_predictions)
     replace_word_pred_scores_all = replace_word_pred_scores_all[1:len(words) - 1, :]
     replace_masked_texts = []
     # -------------------INSERT---------------------
@@ -308,6 +308,14 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
         if feature.change > int(0.4 * (len(words))):
             feature.success = 1  # exceed
             return feature
+        
+        tgt_word = words[top_index[0]]
+        if tgt_word == ' ':
+            continue
+        if tgt_word in chinese_filter_words and attack_name=='BertAttack':
+            continue
+        if top_index[0] > max_length - 2 or top_index[0] == 0 or top_index[0] == len(words)-1:
+            continue
         if attack_name in ['CLARE']:
             CLARE_attack_index.append(top_index[0])
 
@@ -319,15 +327,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
 
             merge_masked_text = merge_mask_based_index(top_index[0], words, tokenizer.mask_token)
             merge_masked_texts.append(merge_masked_text)
-
-        tgt_word = words[top_index[0]]
-        if tgt_word == ' ':
             continue
-        if tgt_word in chinese_filter_words and attack_name=='BertAttack':
-            continue
-        if top_index[0] > max_length - 2 or top_index[0] == 0 or top_index[0] == len(words)-1:
-            continue
-
         if attack_name == 'BertAttack' or (attack_name == 'BAE' and (attack_mode == 'R' or attack_mode == 'R+I') ):
             substitutes = replace_word_predictions[top_index[0]-1:top_index[0]]  # L, k
             word_pred_scores = replace_word_pred_scores_all[top_index[0]-1:top_index[0]]
@@ -440,37 +440,47 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
             else:
                 final_words = final_words[:insert_index+1] + final_words[insert_index+2:]
     if attack_name == 'CLARE':
+        all_attack_class = []
+        all_attack_words = []
+        all_min_prob = []
+        all_attack_index = []
+        add_index = [0 for _ in range(len(final_words))]
         assert(len(replace_masked_texts)==len(insert_after_masked_texts)==len(merge_masked_texts)==len(CLARE_attack_index))
         for i in range(len(replace_masked_texts)):
             replace_masked_text = replace_masked_texts[i]
             insert_masked_text = insert_after_masked_texts[i]
             merge_masked_text = merge_masked_texts[i]
             attack_index = CLARE_attack_index[i]
+            if attack_index == 0:
+                continue
+            all_attack_index.append(attack_index)
             replace_inputs_ids = torch.tensor([tokenizer.convert_tokens_to_ids(replace_masked_text)])
             insert_inputs_ids = torch.tensor([tokenizer.convert_tokens_to_ids(insert_masked_text)])
             merge_inputs_ids = torch.tensor([tokenizer.convert_tokens_to_ids(merge_masked_text)])
 
             replace_substitutes = replace_word_predictions[attack_index-1:attack_index]  # L, k
+            # print(replace_substitutes)
             replace_word_pred_scores = replace_word_pred_scores_all[attack_index-1:attack_index]
             replace_substitutes = get_substitues(replace_substitutes, tokenizer, mlm_model, use_bpe, 
                                          replace_word_pred_scores, threshold_pred_score)
-
+            # print(replace_substitutes)
             insert_word_predictions = mlm_model(insert_inputs_ids.to('cuda'))[0].squeeze()
             insert_word_pred_scores_all, insert_word_predictions = torch.topk(insert_word_predictions, k, -1)
             insert_substitutes = insert_word_predictions[attack_index+1:attack_index+2]
             insert_word_pred_scores = insert_word_pred_scores_all[attack_index+1:attack_index+2]
             insert_substitutes = get_substitues(insert_substitutes, tokenizer, mlm_model, 
                                                 use_bpe, insert_word_pred_scores, threshold_pred_score)
-
+            # print(insert_substitutes)
             merge_word_predictions = mlm_model(merge_inputs_ids.to('cuda'))[0].squeeze()
             merge_word_pred_scores_all, merge_word_predictions = torch.topk(merge_word_predictions, k , -1)
             merge_substitutes = merge_word_predictions[attack_index:attack_index+1]
             merge_word_pred_scores = merge_word_pred_scores_all[attack_index:attack_index+1]
             merge_substitutes = get_substitues(merge_substitutes, tokenizer, mlm_model, 
                                                 use_bpe, merge_word_pred_scores, threshold_pred_score)
-            
+            # print(merge_substitutes)
             attack_class = None
-            max_gap = 0.0
+            attack_word = None
+            min_prob = 1
             replace_texts = []
             insert_texts = []
             merge_texts = []
@@ -478,37 +488,81 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
                 replace_substitute = replace_substitutes[j]
                 insert_substitute = insert_substitutes[j]
                 merge_substitute = merge_substitutes[j]
-                if j==0:
-                    insert_masked_text[attack_index+1] = insert_substitute
-                    insert_text = tokenizer.convert_tokens_to_ids(insert_masked_text)
-                    insert_texts.append(insert_text)
-                    merge_masked_text[attack_index] = merge_substitute
-                    merge_text = tokenizer.convert_tokens_to_ids(merge_masked_text)
-                    merge_texts.append(merge_text)
-                else:
-                    replace_masked_text[attack_index] = replace_substitute
-                    replace_text = tokenizer.convert_tokens_to_ids(replace_masked_text)
-                    replace_texts.append(replace_text)
-                    insert_masked_text[attack_index+1] = insert_substitute
-                    insert_text = tokenizer.convert_tokens_to_ids(insert_masked_text)
-                    insert_texts.append(insert_text)
-                    merge_masked_text[attack_index] = merge_substitute
-                    merge_text = tokenizer.convert_tokens_to_ids(merge_masked_text)
-                    merge_texts.append(merge_text)
+                replace_masked_text[attack_index] = replace_substitute
+                replace_text = tokenizer.convert_tokens_to_ids(replace_masked_text)
+                replace_texts.append(replace_text)
+                insert_masked_text[attack_index+1] = insert_substitute
+                insert_text = tokenizer.convert_tokens_to_ids(insert_masked_text)
+                insert_texts.append(insert_text)
+                merge_masked_text[attack_index] = merge_substitute
+                merge_text = tokenizer.convert_tokens_to_ids(merge_masked_text)
+                merge_texts.append(merge_text)
             j = 0
             while(j<k):
                 replace_inputs = replace_texts[j:j+batch_size]
                 insert_inputs = insert_texts[j:j+batch_size]
                 merge_inputs = merge_texts[j:j+batch_size]
+                replace_prob = tgt_model(torch.tensor(replace_inputs).to('cuda'))[0]
+                insert_prob = tgt_model(torch.tensor(insert_inputs).to('cuda'))[0]
+                merge_prob = tgt_model(torch.tensor(merge_inputs).to('cuda'))[0]
+                for index, prob in enumerate(replace_prob):
+                    tmp_replace_prob = prob
+                    tmp_replace_prob = torch.softmax(tmp_replace_prob, -1)[orig_label]
+                    tmp_insert_prob = insert_prob[index]
+                    tmp_insert_prob = torch.softmax(tmp_insert_prob, -1)[orig_label]
+                    tmp_merge_prob = merge_prob[index]
+                    tmp_merge_prob = torch.softmax(tmp_merge_prob, -1)[orig_label]
+                    if tmp_replace_prob < min_prob:
+                        attack_class = 'R'
+                        min_prob = tmp_replace_prob
+                        attack_word = replace_substitutes[j+index]
+                    if tmp_insert_prob < min_prob:
+                        attack_class = 'I'
+                        min_prob = tmp_insert_prob
+                        attack_word = insert_substitutes[j+index]
+                    if tmp_merge_prob < min_prob:
+                        attack_class = 'M'
+                        min_prob = tmp_merge_prob
+                        attack_word = merge_substitutes[j+index]
                 j += batch_size
-                replace_prob = tgt_model(torch.tensor(replace_inputs))
-                insert_prob = tgt_model(torch.tensor(insert_inputs))
-                merge_prob = tgt_model(torch.tensor(merge_inputs))
-                
+            all_attack_class.append(attack_class)
+            all_attack_words.append(attack_word)
+            all_min_prob.append(min_prob)
+        print(all_attack_class, all_attack_words)
+        all_min_prob = list(map(list,zip(range(len(all_min_prob)), all_min_prob)))
+        all_min_prob = sorted(all_min_prob, key=lambda x: x[1], reverse=False)
+        for index, prob in enumerate(all_min_prob):
+            if index >= max_change_times:
+                feature.success = 1  # exceed
+                return feature
+            org_index = prob[0]
+            attack_class = all_attack_class[org_index]
+            attack_index = all_attack_index[org_index]
+            attack_word = all_attack_words[org_index]
+            if attack_class == 'R':
+                final_words[attack_index + add_index[org_index]] = attack_word
+            elif attack_class == 'I':
+                final_words = final_words[:attack_index + add_index[org_index] + 1] + [attack_word] + final_words[attack_index + add_index[org_index] + 1:]
+                add_index = [add_index[i]for i in range(attack_index+1)] + [add_index[i] + 1 for i in range(attack_index+1, len(words))]
+            elif attack_class == 'M':
+                if attack_index + 2 + add_index[org_index] < len(final_words):
+                    final_words = final_words[:attack_index + add_index[org_index]] + [attack_word] + final_words[attack_index + add_index[org_index] + 2:]
+                else:
+                    final_words = final_words[:attack_index + add_index[org_index]] + [attack_word]
+                add_index = [add_index[i]for i in range(attack_index+1)] + [add_index[i] - 1 for i in range(attack_index+1, len(words))]
+            input_ids = torch.tensor(tokenizer.convert_tokens_to_ids(final_words)).unsqueeze(0).to('cuda')
+            cur_prob = tgt_model(input_ids)[0].squeeze()
+            cur_prob = torch.softmax(cur_prob, -1)
+            cur_label = torch.argmax(cur_prob)
+            feature.change += 1
+            feature.changes.append([attack_index, attack_word, attack_class])
+            if cur_label != orig_label:
+                feature.final_adverse = ''.join(final_words)
+                feature.success = 4
+                return feature
     feature.final_adverse = ''.join(final_words)
     feature.success = 2
     return feature
-
 
 def evaluate(features):
     do_use = 0
@@ -587,7 +641,7 @@ def run_attack():
     parser.add_argument("--attack_name", type=str, default='BertAttack')
     parser.add_argument("--attack_mode", type=str, choices=['R', 'I', 'R/I', 'R+I'], default=None)
     parser.add_argument("--use_threshold", type=float, default=0.7)
-    
+    parser.add_argument("--max_change_times", type=int, default=10)
     attack_list = ['BertAttack', 'TextFooler', 'BAE', 'CLARE']
     
     args = parser.parse_args()
@@ -635,7 +689,7 @@ def run_attack():
             feat = attack(feat, tgt_model, mlm_model, tokenizer_tgt, k, batch_size=16, max_length=64, 
                           attack_name = args.attack_name, attack_mode=args.attack_mode,
                           cos_mat=cos_mat, w2i=w2i, i2w=i2w, use_bpe=use_bpe,threshold_pred_score=threshold_pred_score,
-                          use_threshold=args.use_threshold)
+                          use_threshold=args.use_threshold, max_change_times=args.max_change_times)
 
             # print(feat.changes, feat.change, feat.query, feat.success)
             if feat.success > 2:
