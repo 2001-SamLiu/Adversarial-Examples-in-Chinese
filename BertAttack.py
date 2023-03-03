@@ -207,7 +207,7 @@ def merge_mask_based_index(index, raw_text, mask_token):
 
 def get_chinese_dict():
     chinese_dict = []
-    with open('chinese_dict.txt', 'r') as f:
+    with open('chinese_dict.txt', 'r', encoding='utf-8') as f:
         data = f.readlines()
         for line in data:
             line = line.strip('\n')
@@ -221,6 +221,8 @@ def get_substitute_words(substitutes, substitutes_score, chinese_dict=None, tgt_
     words, scores = get_substitute_words(substitutes[1:], substitutes_score[1:])
     for sub_word, sub_score in zip(substitutes[0], substitutes_score[0]):
         for word, score in zip(words, scores):
+            if isinstance(word, str):
+                word = [word]
             if len(word) == tgt_len-1:
                 tmp_word = [sub_word] + word
                 tmp_word = ''.join(tmp_word)
@@ -547,23 +549,24 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
                     feature.success = 4
                     return feature
     else:
+        chinese_dict = get_chinese_dict()
         for top_index in replace_list_of_index:
             if feature.change > int(0.4 * (len(words))):
                 feature.success = 1
                 return feature
             left_index = seg_keys[top_index[0]][0]
             right_index = seg_keys[top_index[0]][1]
-            tgt_words = words[left_index, right_index]
-            if tgt_words.strip() == '':
+            tgt_words = words[left_index:right_index]
+            if (''.join(tgt_words)).strip() == '':
                 continue
             if left_index > max_length - 2 or left_index == 0 or left_index == len(words)-1:
                 continue
-            substitutes = replace_word_predictions[left_index, right_index]
-            word_pred_scores = replace_word_pred_scores_all[left_index, right_index]
+            substitutes = replace_word_predictions[left_index: right_index]
+            word_pred_scores = replace_word_pred_scores_all[left_index: right_index]
             substitutes = get_substitues(substitutes, tokenizer, mlm_model, use_bpe, word_pred_scores, threshold_pred_score)
             most_gap = 0.0
             candidate = None
-            chinese_dict = get_chinese_dict()
+            
             substitute_words, substitute_scores = get_substitute_words(substitutes, word_pred_scores, chinese_dict, tgt_len=len(substitutes))
             substitute_pair = [[word, score] for word, score in zip(substitute_words, substitute_scores)]
             substitute_pair = sorted(substitute_pair, key=lambda x:x[1], reverse=True)
@@ -588,7 +591,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
 
                 if temp_label != orig_label:
                     feature.change += len(word)
-                    final_words[left_index, right_index] = word
+                    final_words[left_index: right_index] = word
                     feature.changes.append([(left_index, right_index), ''.join(word), tgt_words])
                     feature.final_adverse = temp_text
                     feature.success = 4
@@ -603,7 +606,7 @@ def attack(feature, tgt_model, mlm_model, tokenizer, k, batch_size, max_length=1
                 feature.change += len(candidate)
                 feature.changes.append([(left_index, right_index), ''.join(candidate), tgt_words])
                 current_prob = current_prob - most_gap
-                final_words[left_index, right_index] = candidate
+                final_words[left_index: right_index] = candidate
     feature.final_adverse = ''.join(final_words)
     feature.success = 2
     return feature
