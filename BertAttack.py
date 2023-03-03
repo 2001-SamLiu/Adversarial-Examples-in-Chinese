@@ -96,7 +96,7 @@ def chinese_tokenize(seq):
     keys = []
     words = []
     seg_keys = []
-    segs = jieba.cut(seq)
+    segs = jieba.lcut(seq)
     index = 1
     for i, seg in enumerate(segs):
         seg_keys.append([index, index+len(seg)])
