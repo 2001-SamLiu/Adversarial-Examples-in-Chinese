@@ -632,7 +632,39 @@ class SickProcessor(DataProcessor):
             examples.append(
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
-
+class TTtitleProcessor(DataProcessor):
+    def get_train_examples(self, data_dir):
+        lines = self._read_tsv(os.path.join(data_dir, "train.tsv"))
+        examples = []
+        for line in lines:
+            for (i, line) in enumerate(lines):
+                if i==0:
+                    continue
+                guid = "%s-%s"%("train", i)
+                text_a = line[1]
+                text_b = None
+                label = int(line[0])
+                examples.append(
+                    InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+                )
+        return examples
+    def get_dev_examples(self, data_dir):
+        lines = self._read_tsv(os.path.join(data_dir, "val.tsv"))
+        examples = []
+        for line in lines:
+            for (i, line) in enumerate(lines):
+                if i==0:
+                    continue
+                guid = "%s-%s"%("val", i)
+                text_a = line[1]
+                text_b = None
+                label = int(line[0])
+                examples.append(
+                    InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+                )
+        return examples
+    def get_labels(self):
+        return [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]
 class TouTiaoProcessor(DataProcessor):
     def get_train_examples(self, data_dir):
         train_file = os.path.join(data_dir, 'train.txt')
@@ -801,6 +833,8 @@ def main():
         "snli": SnliProcessor,
         "sick": SickProcessor,
         'toutiao': TouTiaoProcessor,
+        'TTtitle':TTtitleProcessor,
+
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -824,7 +858,7 @@ def main():
     elif args.do_test:
         torch.save(args, os.path.join(args.output_dir, "test_args.bin"))
 
-    task_name = args.task_name.lower()
+    task_name = args.task_name
     if task_name not in processors:
         raise ValueError("Task not found: %s" % task_name)
 
