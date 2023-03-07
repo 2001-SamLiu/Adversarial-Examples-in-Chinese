@@ -634,12 +634,14 @@ class SickProcessor(DataProcessor):
         return examples
 class TTtitleProcessor(DataProcessor):
     def get_train_examples(self, data_dir):
-        lines = self._read_tsv(os.path.join(data_dir, "train.tsv"))
+        file = open(os.path.join(data_dir, 'train.tsv'), 'r', encoding='utf-8')
+        lines = file.read().splitlines()
         examples = []
         for line in lines:
             for (i, line) in enumerate(lines):
                 if i==0:
                     continue
+                line = line.split('\t')
                 guid = "%s-%s"%("train", i)
                 text_a = line[1]
                 text_b = None
@@ -649,13 +651,15 @@ class TTtitleProcessor(DataProcessor):
                 )
         return examples
     def get_dev_examples(self, data_dir):
-        lines = self._read_tsv(os.path.join(data_dir, "val.tsv"))
+        file = open(os.path.join(data_dir, 'val.tsv'), 'r', encoding='utf-8')
+        lines = file.read().splitlines()
         examples = []
         for line in lines:
             for (i, line) in enumerate(lines):
                 if i==0:
                     continue
                 guid = "%s-%s"%("val", i)
+                line = line.split('\t')
                 text_a = line[1]
                 text_b = None
                 label = int(line[0])
