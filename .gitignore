@@ -5,3 +5,4 @@ data/output.json
 universal-sentence-encoder-multilingual-large_3.tar.gz
 test.py
 toutiao_finetuned_model/eval_results.txt
+TT_title_finetuned_model/eval_results.txt
