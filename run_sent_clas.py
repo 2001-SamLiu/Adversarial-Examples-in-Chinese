@@ -637,35 +637,33 @@ class TTtitleProcessor(DataProcessor):
         file = open(os.path.join(data_dir, 'train.tsv'), 'r', encoding='utf-8')
         lines = file.read().splitlines()
         examples = []
-        for line in lines:
-            for (i, line) in enumerate(lines):
-                if i==0:
-                    continue
-                line = line.split('\t')
-                guid = "%s-%s"%("train", i)
-                text_a = line[1]
-                text_b = None
-                label = int(line[0])
-                examples.append(
-                    InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
-                )
+        for (i, line) in enumerate(lines):
+            if i==0:
+                continue
+            line = line.split('\t')
+            guid = "%s-%s"%("train", i)
+            text_a = line[1]
+            text_b = None
+            label = int(line[0])
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+            )
         return examples
     def get_dev_examples(self, data_dir):
         file = open(os.path.join(data_dir, 'val.tsv'), 'r', encoding='utf-8')
         lines = file.read().splitlines()
         examples = []
-        for line in lines:
-            for (i, line) in enumerate(lines):
-                if i==0:
-                    continue
-                guid = "%s-%s"%("val", i)
-                line = line.split('\t')
-                text_a = line[1]
-                text_b = None
-                label = int(line[0])
-                examples.append(
-                    InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
-                )
+        for (i, line) in enumerate(lines):
+            if i==0:
+                continue
+            guid = "%s-%s"%("val", i)
+            line = line.split('\t')
+            text_a = line[1]
+            text_b = None
+            label = int(line[0])
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+            )
         return examples
     def get_labels(self):
         return [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]
