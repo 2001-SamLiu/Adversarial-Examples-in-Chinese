@@ -13,7 +13,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm, trange
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from transformers import SchedulerType, get_scheduler
-
+import pandas as pd
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
                     datefmt="%m/%d/%Y %H:%M:%S",
@@ -688,7 +688,7 @@ class TouTiaoProcessor(DataProcessor):
             datas = f.read().splitlines()
             for i, data in enumerate(datas):
                 data = data.split('_!_')
-                guid = "%s-%s"%('train',i)
+                guid = "%s-%s"%('eval',i)
                 text_a = data[-2]
                 label = int(data[1]) - 100
                 examples.append(
@@ -696,6 +696,35 @@ class TouTiaoProcessor(DataProcessor):
         return examples
     def get_labels(self):
         return [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+class WeiboProcessor(DataProcessor):
+    def get_train_examples(self, data_dir):
+        train_file = os.path.join(data_dir, 'train.csv')
+        examples = []
+        train_file = pd.read_csv(train_file, encoding='utf-8', header=0)
+        for index, row in train_file.iterrows():
+            guid = "%s-%s"%("train", index)
+            text_a = row['review']
+            text_b = None
+            label = int(row['label'])
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+            )
+        return examples
+    def get_dev_examples(self, data_dir):
+        eval_file = os.path.join(data_dir, 'eval.csv')
+        examples = []
+        eval_file = pd.read_csv(eval_file, encoding='utf-8', header=0)
+        for index, row in eval_file.iterrows():
+            guid = "%s-%s"%("eval", index)
+            text_a = row['review']
+            text_b = None
+            label = int(row['label'])
+            examples.append(
+                InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label)
+            )
+        return examples
+    def get_labels(self):
+        return [0,1]
 def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
     label_map = {label: i for i, label in enumerate(label_list)}
     features = []
@@ -836,7 +865,7 @@ def main():
         "sick": SickProcessor,
         'toutiao': TouTiaoProcessor,
         'TTtitle':TTtitleProcessor,
-
+        'weibo_senti':WeiboProcessor,
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
